@@ -1,1 +1,5 @@
-#include "rotary_encoder.h"
+#include "../board.h"
+
+void init_rotary_encoder() {
+    // 
+}

@@ -39,6 +39,13 @@
 
 #include "cybsp.h"
 #include "cy_utils.h"
+#include "xmc_gpio.h"
+#include "api/board.h"
+
+/* Digital gain after the ADC. Keep at 1: gain here also multiplies the ADC
+ * noise. Get level from the source volume (or an analog preamp) instead. */
+#define PASSTHROUGH_GAIN 1
+static int32_t gain_effect(int32_t x) { return x * PASSTHROUGH_GAIN; }
 
 int main(void)
 {
@@ -51,8 +58,39 @@ int main(void)
         CY_ASSERT(0);
     }
 
+    /* Audio passthrough P14.0 -> P14.8. For bring-up, try:
+     *   audio_set_test_mode(AUDIO_TEST_MIDSCALE);   // P14.8 ~1.4 V DC
+     *   audio_set_test_mode(AUDIO_TEST_SINE_1K);    // 1 kHz tone
+     */
+    init_audio(AUDIO_SAMPLE_RATE_HZ);
+    if (PASSTHROUGH_GAIN != 1) { audio_set_effect(gain_effect); }
+    // audio_set_test_mode(AUDIO_TEST_SINE_1K);   // 1 kHz at any sample rate
+
+    /* LED1: heartbeat, toggles once per second while the audio ISR runs.
+     * LED2: signal indicator, on while the DAC output swings more than
+     *       SIGNAL_THRESHOLD counts from mid-scale (checked every 50 ms). */
+    // Scaled by the gain: the gain also amplifies the ADC's ~+/-20 count
+    // noise floor, so a fixed 64 would trip on silence.
+    const uint16_t SIGNAL_THRESHOLD = 64 * PASSTHROUGH_GAIN;
+    const uint32_t CHECK_PERIOD = AUDIO_SAMPLE_RATE_HZ / 20;
+    uint32_t next_blink = AUDIO_SAMPLE_RATE_HZ;
+    uint32_t next_check = CHECK_PERIOD;
     for (;;)
     {
+        uint32_t now = audio_sample_count();
+        if ((int32_t)(now - next_blink) >= 0)
+        {
+            next_blink += AUDIO_SAMPLE_RATE_HZ;
+            XMC_GPIO_ToggleOutput(CYBSP_USER_LED_PORT, CYBSP_USER_LED_PIN);
+        }
+        if ((int32_t)(now - next_check) >= 0)
+        {
+            next_check += CHECK_PERIOD;
+            if (audio_out_peak() > SIGNAL_THRESHOLD)
+                XMC_GPIO_SetOutputHigh(CYBSP_USER_LED2_PORT, CYBSP_USER_LED2_PIN);
+            else
+                XMC_GPIO_SetOutputLow(CYBSP_USER_LED2_PORT, CYBSP_USER_LED2_PIN);
+        }
     }
 }
 

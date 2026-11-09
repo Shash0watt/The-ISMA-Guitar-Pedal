@@ -7,3 +7,6 @@ images
 .vscode
 
 templates/
+
+# Mac-only test harness (has its own main(); never part of the firmware)
+host

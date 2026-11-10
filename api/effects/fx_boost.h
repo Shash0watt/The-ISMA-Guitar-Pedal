@@ -2,7 +2,7 @@
 #define FX_BOOST_H
 
 /*
- * Clean boost: multiplies the signal by a fixed gain, no distortion.
+ * Clean boost: multiplies the signal by a gain, no distortion.
  *
  * Knob (0..1, like a pot):
  *   gain: 0 .. +20 dB
@@ -10,8 +10,10 @@
 
 #include <stdint.h>
 
+#include "fx_common.h"
+
 typedef struct {
-    float gain_mult; /* multiplier applied to every sample */
+    fx_smoothed_t gain_mult; /* multiplier applied to every sample, glides on change */
 } fx_boost_t;
 
 void fx_boost_init(fx_boost_t *state, float sample_rate);

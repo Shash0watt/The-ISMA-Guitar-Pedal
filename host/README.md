@@ -28,6 +28,21 @@ host/build/fxrun boost host/out/pluck.wav host/out/boost.wav gain=0.7
 host/build/fxrun --list
 ```
 
+### Turning knobs during the file
+
+A knob can change partway through, written as `value@seconds` steps separated
+by commas. This is how to hear whether an effect clicks when a knob moves:
+
+```bash
+# gain starts at 0, jumps to 0.3 at 0.3 s, back to 0 at 0.7 s, up again at 1.1 s
+host/build/fxrun boost host/out/sine.wav host/out/zip.wav gain=0,0.3@0.3011,0@0.7023,0.3@1.1037
+```
+
+Changes land between 32-sample blocks, the same way the pedal's control code
+will update knobs between audio interrupts. Tip: with a sine test file, avoid
+round times like `@0.5`, which can land exactly on a zero crossing and hide the
+click.
+
 `host/out/` is git-ignored, so test output doesn't get committed.
 
 fxrun reads any common WAV (16/24/32-bit, float, mono or stereo) and writes

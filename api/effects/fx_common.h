@@ -15,6 +15,10 @@
 
 #include <math.h>
 
+#include "fx_config.h"
+
+#define FX_TWO_PI 6.28318530717959f
+
 /* Keeps value between minimum and maximum. */
 static inline float fx_clamp(float value, float minimum, float maximum)
 {
@@ -54,6 +58,49 @@ static inline float fx_knob_to_range(float knob, float minimum, float maximum)
 static inline float fx_soft_clip(float sample)
 {
     return sample / (1.0f + fabsf(sample));
+}
+
+/*
+ * A value that glides toward its target instead of jumping, so turning a knob
+ * doesn't click.
+ *
+ *   setter (knob moved):     smoothed.target = new value
+ *   process (every sample):  value = fx_smoothed_next(&smoothed)
+ *
+ * Each sample, current moves a fixed fraction (coefficient) of the remaining
+ * distance to target: big steps at first, then gently settling. It's a very
+ * slow low-pass filter on the knob value.
+ */
+typedef struct {
+    float target;      /* where the knob says the value should be */
+    float current;     /* the value actually used on the audio right now */
+    float coefficient; /* fraction of the gap closed per sample (0..1) */
+} fx_smoothed_t;
+
+/* Sets up the glide speed from FX_SMOOTHING_HZ and starts at initial_value
+ * (no glide at startup). Uses expf, so call it from init(), not per sample.
+ *
+ *   coefficient = 1 - e^(-2 * pi * FX_SMOOTHING_HZ / sample_rate) */
+static inline void fx_smoothed_init(fx_smoothed_t *smoothed, float sample_rate,
+                                    float initial_value)
+{
+    smoothed->coefficient = 1.0f - expf(-FX_TWO_PI * FX_SMOOTHING_HZ / sample_rate);
+    smoothed->target = initial_value;
+    smoothed->current = initial_value;
+}
+
+/* Moves current one sample's worth toward target and returns it. */
+static inline float fx_smoothed_next(fx_smoothed_t *smoothed)
+{
+    smoothed->current += smoothed->coefficient * (smoothed->target - smoothed->current);
+    return smoothed->current;
+}
+
+/* Jumps straight to target with no glide. For init() after setting default
+ * knob values, so the effect doesn't start with a fade. */
+static inline void fx_smoothed_skip_to_target(fx_smoothed_t *smoothed)
+{
+    smoothed->current = smoothed->target;
 }
 
 #endif

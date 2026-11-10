@@ -13,9 +13,11 @@
 
 #include <stdint.h>
 
+#include "fx_common.h"
+
 typedef struct {
-    float drive_gain; /* multiplier before the clipper */
-    float level_gain; /* multiplier after the clipper */
+    fx_smoothed_t drive_gain; /* multiplier before the clipper, glides on change */
+    fx_smoothed_t level_gain; /* multiplier after the clipper, glides on change */
 } fx_overdrive_t;
 
 void fx_overdrive_init(fx_overdrive_t *state, float sample_rate);

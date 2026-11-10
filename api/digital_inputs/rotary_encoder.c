@@ -12,10 +12,10 @@ typedef struct {
 
 // all encoders on the board (is_pressed starts at 0 = released)
 static encoder_t encoders[NUM_ENCODERS] = {
-    { .port = XMC_GPIO_PORT0, .pin_a = 1, .pin_b = 2, .button = 3 },  // matches Device Configurator (P0.1-P0.3)
-    // { .port = XMC_GPIO_PORT0, .pin_a = 3, .pin_b = 4, .button = 5 },  // TODO
-    // { .port = XMC_GPIO_PORT0, .pin_a = 6, .pin_b = 7, .button = 8 },  // TODO
-    // { .port = XMC_GPIO_PORT0, .pin_a = 9, .pin_b = 10, .button = 11 }, // TODO
+    { .port = XMC_GPIO_PORT0, .pin_a = 0, .pin_b = 1,  .button = 2  },  // encoder 0: P0.0-P0.2
+    { .port = XMC_GPIO_PORT0, .pin_a = 3, .pin_b = 4,  .button = 5  },  // encoder 1: P0.3-P0.5
+    { .port = XMC_GPIO_PORT0, .pin_a = 6, .pin_b = 7,  .button = 8  },  // encoder 2: P0.6-P0.8
+    { .port = XMC_GPIO_PORT0, .pin_a = 9, .pin_b = 10, .button = 11 },  // encoder 3: P0.9-P0.11
 };
 
 

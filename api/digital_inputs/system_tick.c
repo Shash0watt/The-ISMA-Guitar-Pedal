@@ -18,6 +18,7 @@ void init_systick()
 
 void SysTick_Handler(){
     poll_encoders();
+    poll_buttons();
 
     // Example: 
     // print the encoder's current position when its button is pressed.

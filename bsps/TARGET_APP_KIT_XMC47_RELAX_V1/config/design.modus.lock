@@ -1,0 +1,5 @@
+HOSTNAME=SJ
+PID=30964
+PIPE=\\.\PIPE\1f6a78ab-0184-4fd1-b486-4332e0fb80e9
+LIBRARIES=C:/Users/shash/.modustoolbox/global/device-db/release-v4.41.0/props.json;C:/Users/shash/Documents/EECS_373/mtb_shared/mtb-xmclib-cat3/release-v4.7.0/props.json;
+USERNAME=shash

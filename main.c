@@ -39,11 +39,26 @@
 
 #include "cybsp.h"
 #include "cy_utils.h"
+#include "api/board.h"
+#include <stdio.h>
+
+// enable printing over uart
+int _write(int file, char *ptr, int len)
+{
+   (void)file;
+   for (int i = 0; i < len; i++){
+       if (ptr[i] == '\n'){
+           XMC_UART_CH_Transmit(CYBSP_DEBUG_UART_HW, '\r');
+       }
+       XMC_UART_CH_Transmit(CYBSP_DEBUG_UART_HW, ptr[i]);
+   }
+   return len;
+}
+
 
 int main(void)
 {
     cy_rslt_t result;
-
     /* Initialize the device and board peripherals */
     result = cybsp_init();
     if (result != CY_RSLT_SUCCESS)
@@ -51,6 +66,7 @@ int main(void)
         CY_ASSERT(0);
     }
 
+    init_systick(); // start the timer for polling UI
     for (;;)
     {
     }

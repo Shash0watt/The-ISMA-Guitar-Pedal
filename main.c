@@ -42,10 +42,59 @@
 #include "xmc_gpio.h"
 #include "api/board.h"
 
-/* Digital gain after the ADC. Keep at 1: gain here also multiplies the ADC
- * noise. Get level from the source volume (or an analog preamp) instead. */
-#define PASSTHROUGH_GAIN 1
-static int32_t gain_effect(int32_t x) { return x * PASSTHROUGH_GAIN; }
+/* ===================== Audio bring-up firmware =====================
+ *
+ * One flash that tests the whole chain. BUTTON1 (P15.13, on the Relax Kit)
+ * cycles through three modes:
+ *
+ *   PASSTHROUGH  (default)  P14.0 -> P14.8. You should hear your music.
+ *                           LED1 blinks slowly (1 Hz).
+ *   SINE         1 kHz tone on P14.8. Tests the output circuit alone.
+ *                           LED1 blinks fast (5 Hz).
+ *   SILENCE      DAC held at mid-scale. Whatever you hear now is analog
+ *                noise/hum from the output circuit or grounding, not audio.
+ *                           LED1 solid on.
+ *
+ * Every boot starts with a 1 s 1 kHz beep, then switches to PASSTHROUGH.
+ * If you hear the beep, the DAC + output circuit + headphones all work.
+ *
+ * LED2 shows the INPUT side:
+ *   fast blink (10 Hz)  input bias is wrong: P14.0 average is far from 1.65 V
+ *                       (check the 10k/10k divider and its 3.3 V wire)
+ *   on                  signal present on the DAC output
+ *   off                 bias OK, silence
+ *
+ * Debugger (Live Watch): dbg_mode, dbg_in_mean (~2048), dbg_out_peak.
+ * ==================================================================== */
+
+typedef enum { MODE_PASSTHROUGH = 0, MODE_SINE, MODE_SILENCE, MODE_COUNT } bringup_mode_t;
+
+#define BOOT_BEEP_MS        1000U
+#define TICK_MS             50U       // LED / button update period
+#define SIGNAL_THRESHOLD    64U       // DAC counts from mid-scale (~35 mV)
+#define BIAS_LOW            1700U     // healthy bias is ~2048 (1.65 V)
+#define BIAS_HIGH           2400U
+
+volatile bringup_mode_t   dbg_mode;
+volatile uint16_t dbg_in_mean;
+volatile uint16_t dbg_out_peak;
+
+static void set_mode(bringup_mode_t m)
+{
+    static const audio_test_mode_t map[MODE_COUNT] = {
+        [MODE_PASSTHROUGH] = AUDIO_TEST_NONE,
+        [MODE_SINE]        = AUDIO_TEST_SINE_1K,
+        [MODE_SILENCE]     = AUDIO_TEST_MIDSCALE,
+    };
+    audio_set_test_mode(map[m]);
+    dbg_mode = m;
+}
+
+static void led(XMC_GPIO_PORT_t *port, uint8_t pin, bool on)
+{
+    if (on) { XMC_GPIO_SetOutputHigh(port, pin); }
+    else    { XMC_GPIO_SetOutputLow(port, pin); }
+}
 
 int main(void)
 {
@@ -58,39 +107,62 @@ int main(void)
         CY_ASSERT(0);
     }
 
-    /* Audio passthrough P14.0 -> P14.8. For bring-up, try:
-     *   audio_set_test_mode(AUDIO_TEST_MIDSCALE);   // P14.8 ~1.4 V DC
-     *   audio_set_test_mode(AUDIO_TEST_SINE_1K);    // 1 kHz tone
-     */
     init_audio(AUDIO_SAMPLE_RATE_HZ);
-    if (PASSTHROUGH_GAIN != 1) { audio_set_effect(gain_effect); }
-    // audio_set_test_mode(AUDIO_TEST_SINE_1K);   // 1 kHz at any sample rate
 
-    /* LED1: heartbeat, toggles once per second while the audio ISR runs.
-     * LED2: signal indicator, on while the DAC output swings more than
-     *       SIGNAL_THRESHOLD counts from mid-scale (checked every 50 ms). */
-    // Scaled by the gain: the gain also amplifies the ADC's ~+/-20 count
-    // noise floor, so a fixed 64 would trip on silence.
-    const uint16_t SIGNAL_THRESHOLD = 64 * PASSTHROUGH_GAIN;
-    const uint32_t CHECK_PERIOD = AUDIO_SAMPLE_RATE_HZ / 20;
-    uint32_t next_blink = AUDIO_SAMPLE_RATE_HZ;
-    uint32_t next_check = CHECK_PERIOD;
+    bringup_mode_t   mode       = MODE_SINE;                  // boot beep
+    uint32_t beep_ticks = BOOT_BEEP_MS / TICK_MS;
+    set_mode(mode);
+
+    const uint32_t tick_samples = AUDIO_SAMPLE_RATE_HZ / (1000U / TICK_MS);
+    uint32_t next_tick = tick_samples;
+    uint32_t ticks     = 0;
+    bool     btn_was_down = false;
+
     for (;;)
     {
-        uint32_t now = audio_sample_count();
-        if ((int32_t)(now - next_blink) >= 0)
+        if ((int32_t)(audio_sample_count() - next_tick) < 0) { continue; }
+        next_tick += tick_samples;
+        ticks++;
+
+        /* End of boot beep -> passthrough */
+        if (beep_ticks && --beep_ticks == 0)
         {
-            next_blink += AUDIO_SAMPLE_RATE_HZ;
-            XMC_GPIO_ToggleOutput(CYBSP_USER_LED_PORT, CYBSP_USER_LED_PIN);
+            mode = MODE_PASSTHROUGH;
+            set_mode(mode);
         }
-        if ((int32_t)(now - next_check) >= 0)
+
+        /* BUTTON1: next mode on press (polling every 50 ms debounces it) */
+        bool btn_down = XMC_GPIO_GetInput(CYBSP_USER_BTN_PORT, CYBSP_USER_BTN_PIN)
+                        == CYBSP_BTN_PRESSED;
+        if (btn_down && !btn_was_down)
         {
-            next_check += CHECK_PERIOD;
-            if (audio_out_peak() > SIGNAL_THRESHOLD)
-                XMC_GPIO_SetOutputHigh(CYBSP_USER_LED2_PORT, CYBSP_USER_LED2_PIN);
-            else
-                XMC_GPIO_SetOutputLow(CYBSP_USER_LED2_PORT, CYBSP_USER_LED2_PIN);
+            beep_ticks = 0;
+            mode = (bringup_mode_t)((mode + 1) % MODE_COUNT);
+            set_mode(mode);
         }
+        btn_was_down = btn_down;
+
+        /* Meters */
+        uint16_t in_mean  = audio_in_mean();
+        uint16_t out_peak = audio_out_peak();
+        dbg_in_mean  = in_mean;
+        dbg_out_peak = out_peak;
+
+        /* LED1: which mode */
+        bool led1;
+        switch (mode)
+        {
+            case MODE_PASSTHROUGH: led1 = (ticks / 10) & 1; break;  // 1 Hz
+            case MODE_SINE:        led1 = (ticks / 2)  & 1; break;  // 5 Hz
+            default:               led1 = true;             break;  // solid
+        }
+        led(CYBSP_USER_LED_PORT, CYBSP_USER_LED_PIN, led1);
+
+        /* LED2: input health / signal present */
+        bool bias_bad = (in_mean < BIAS_LOW) || (in_mean > BIAS_HIGH);
+        bool led2 = bias_bad ? (ticks & 1)                   // 10 Hz blink
+                             : (out_peak > SIGNAL_THRESHOLD);
+        led(CYBSP_USER_LED2_PORT, CYBSP_USER_LED2_PIN, led2);
     }
 }
 

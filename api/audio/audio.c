@@ -11,6 +11,7 @@ volatile uint16_t audio_in_last;
 volatile uint16_t audio_out_last;
 
 static volatile uint32_t sample_count;
+static volatile uint32_t in_sum, in_n;                      // for audio_in_mean()
 static volatile uint16_t out_peak;                         // max |out - 2048| since last read
 static volatile audio_effect_t current_effect;              // NULL = passthrough
 static volatile audio_test_mode_t test_mode = AUDIO_TEST_NONE;
@@ -40,6 +41,15 @@ void init_audio(uint32_t sample_rate_hz)
 void audio_set_effect(audio_effect_t effect)    { current_effect = effect; }
 void audio_set_test_mode(audio_test_mode_t mode) { test_mode = mode; }
 uint32_t audio_sample_count(void)                { return sample_count; }
+
+uint16_t audio_in_mean(void)
+{
+    __disable_irq();
+    uint32_t sum = in_sum, n = in_n;
+    in_sum = 0; in_n = 0;
+    __enable_irq();
+    return n ? (uint16_t)(sum / n) : 0;
+}
 
 uint16_t audio_out_peak(void)
 {
@@ -84,6 +94,7 @@ void SysTick_Handler(void)
 
     uint16_t dev = (out >= AUDIO_MID) ? (out - AUDIO_MID) : (AUDIO_MID - out);
     if (dev > out_peak) { out_peak = dev; }
+    in_sum += in; in_n++;
 
     audio_in_last  = in;
     audio_out_last = out;

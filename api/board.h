@@ -60,6 +60,10 @@ uint32_t audio_sample_count(void);
 // call. Reading clears it. Silence reads near 0; the 1 kHz test reads ~1000.
 uint16_t audio_out_peak(void);
 
+// Average ADC input (0..4095) since the last call. Reading clears it.
+// With the input silent this is the bias level: ~2048 if the divider is right.
+uint16_t audio_in_mean(void);
+
 
 // === ADC (api/adc) ===
 // VADC group 0, channel 0 on P14.0. 12-bit, 1.65 V bias -> ~2048 on silence.

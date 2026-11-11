@@ -1,26 +1,18 @@
 #include "../board.h"
-#include "xmc_common.h"
 #include <stdio.h>
 
-void init_systick()
+// Polls every input. main() calls this once per millisecond from its loop.
+//
+// This used to be SysTick_Handler with its own 1 ms SysTick, but the audio
+// engine (api/audio) needs SysTick for the 96 kHz sample interrupt. Polling
+// from the main loop keeps the inputs off the audio interrupt entirely, and
+// printf is safe here (it isn't inside an interrupt).
+void poll_inputs(void)
 {
-    // Make sure the SystemCoreClock value is correct (recompute from the clock registers)
-    
-    SystemCoreClockUpdate();
-
-    // SysTick_Config - Creates a periodic SysTick interrupt using the SysTick timer, 
-    // with a interval defined by the ticks parameter
-    // System Core Clock - global variable holding the current frequency of the processor
-    //  core clock in Hertz (144 Mhz)
-    SysTick_Config(SystemCoreClock / 1000U); // ~ every 1ms
-}
-
-
-void SysTick_Handler(){
     poll_encoders();
     poll_buttons();
 
-    // Example: 
+    // Example:
     // print the encoder's current position when its button is pressed.
     // is_pressed stays 1 the whole time it's held, so only print on the
     // 0 -> 1 change (otherwise it would print every 1 ms while held).

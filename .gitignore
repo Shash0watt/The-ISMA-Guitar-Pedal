@@ -23,6 +23,14 @@ GeneratedSource/
 
 # ModusToolbox build system output
 build/
+.ninja_log
+
+# ModusToolbox per-machine files (contain local paths / session info)
+.mtbqueryapi
+*.modus.lock
+
+# clangd index cache
+.cache/
 Debug/
 Release/
 *_build/
@@ -30,10 +38,7 @@ Release/
 # Visual Studio Code
 openocd.tcl
 .vscode/
-!.vscode/settings.json
-!.vscode/tasks.json
-!.vscode/launch.json
-!.vscode/extensions.json
+*.code-workspace
 
 # IAR Embedded Workbench files
 

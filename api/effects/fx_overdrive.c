@@ -10,9 +10,8 @@ void fx_overdrive_init(fx_overdrive_t *state, float sample_rate)
     fx_smoothed_init(&state->drive_gain, sample_rate, 1.0f);
     fx_smoothed_init(&state->level_gain, sample_rate, 1.0f);
 
-    /* Start with both knobs at noon: +20 dB drive, -10 dB level. On a typical
-     * guitar signal that's a medium crunch at roughly the input volume.
-     * Skip the glide so the effect doesn't fade in at power-on. */
+    /* Start with both knobs at noon (+20 dB drive, -10 dB level: a medium
+     * crunch), and skip the glide so the effect doesn't fade in at power-on. */
     fx_overdrive_set_drive(state, 0.5f);
     fx_overdrive_set_level(state, 0.5f);
     fx_smoothed_skip_to_target(&state->drive_gain);
@@ -21,14 +20,14 @@ void fx_overdrive_init(fx_overdrive_t *state, float sample_rate)
 
 void fx_overdrive_set_drive(fx_overdrive_t *state, float knob)
 {
-    float decibels = fx_knob_to_range(knob, OVERDRIVE_DRIVE_MIN_DB, OVERDRIVE_DRIVE_MAX_DB);
-    state->drive_gain.target = fx_db_to_gain(decibels);
+    state->drive_gain.target =
+        fx_knob_to_gain(knob, OVERDRIVE_DRIVE_MIN_DB, OVERDRIVE_DRIVE_MAX_DB);
 }
 
 void fx_overdrive_set_level(fx_overdrive_t *state, float knob)
 {
-    float decibels = fx_knob_to_range(knob, OVERDRIVE_LEVEL_MIN_DB, OVERDRIVE_LEVEL_MAX_DB);
-    state->level_gain.target = fx_db_to_gain(decibels);
+    state->level_gain.target =
+        fx_knob_to_gain(knob, OVERDRIVE_LEVEL_MIN_DB, OVERDRIVE_LEVEL_MAX_DB);
 }
 
 void fx_overdrive_process(fx_overdrive_t *state, const float *input, float *output,

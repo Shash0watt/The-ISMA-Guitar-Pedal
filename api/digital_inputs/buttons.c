@@ -1,27 +1,26 @@
 #include "../board.h"
 
 typedef struct {
-    XMC_GPIO_PORT_t *port;
-    uint8_t pin;
+    pin_t pin;
     volatile uint8_t is_pressed; // 1 while the button is held down
 } button_t;
 
 static button_t buttons[NUM_BUTTONS] = {
-    { .port = XMC_GPIO_PORT0, .pin = 15 },  // button 0: P0.15
-    { .port = XMC_GPIO_PORT0, .pin = 14 },  // button 1: P0.14
-    { .port = XMC_GPIO_PORT0, .pin = 13 },  // button 2: P0.13
-    { .port = XMC_GPIO_PORT0, .pin = 12 },  // button 3: P0.12
+    { .pin = { BUTTON_0_PIN } },
+    { .pin = { BUTTON_1_PIN } },
+    { .pin = { BUTTON_2_PIN } },
+    { .pin = { BUTTON_3_PIN } },
 };
 
-
-// no debouncing yet
+// Pressing the button pulls its pin low, so pressed reads as 0.
+// No debouncing yet.
 static void poll_button(button_t *button) {
-    button->is_pressed = (XMC_GPIO_GetInput(button->port, button->pin) == 0);
+    button->is_pressed = (read_pin(button->pin) == 0);
 }
 
 void poll_buttons(void) {
-    for (int i = 0; i < NUM_BUTTONS; i++) {
-        poll_button(&buttons[i]);
+    for (int button_index = 0; button_index < NUM_BUTTONS; button_index++) {
+        poll_button(&buttons[button_index]);
     }
 }
 

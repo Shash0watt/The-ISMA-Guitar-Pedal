@@ -1,80 +1,96 @@
 #include "../board.h"
 
+// How the knob is read (quadrature decoding):
+// Pins A and B together make a 2-bit state, A in bit 1 and B in bit 0. The knob
+// rests at 11 in every detent, and one click walks through all four states:
+//   clockwise:          11 -> 01 -> 00 -> 10 -> 11
+//   counter-clockwise:  11 -> 10 -> 00 -> 01 -> 11
+// Every step changes exactly one pin, and which pin changed first gives the
+// direction. A click is counted when the knob lands back at 11.
+#define DETENT_STATE 0x3
+
 // rotary encoder struct (private to this file; other files use the functions in board.h)
 typedef struct {
-    XMC_GPIO_PORT_t *port;
-    uint8_t pin_a, pin_b, button;
-    uint8_t prev;               // last AB state (2 bits)
-    int8_t  accum;              // sub-steps since last detent
-    volatile int32_t position;  // detent count, can be read by the rest of the code
-    volatile uint8_t is_pressed; // 1 while the button is held down, can be read by the rest of the code
+    pin_t pin_a, pin_b;          // A is the KY-040's CLK pin, B is its DT pin
+    pin_t button_pin;
+    uint8_t previous_state;      // last AB state (2 bits)
+    int8_t  steps_since_detent;  // steps turned since the last detent: + clockwise, - counter-clockwise
+    volatile int32_t position;   // clicks up from fully down: 0..ENCODER_STEPS
+    volatile uint8_t is_pressed; // 1 while the button is held down
 } encoder_t;
 
-// all encoders on the board (is_pressed starts at 0 = released)
+// all encoders on the board
 static encoder_t encoders[NUM_ENCODERS] = {
-    { .port = XMC_GPIO_PORT0, .pin_a = 0, .pin_b = 1,  .button = 2  },  // encoder 0: P0.0-P0.2
-    { .port = XMC_GPIO_PORT0, .pin_a = 3, .pin_b = 4,  .button = 5  },  // encoder 1: P0.3-P0.5
-    { .port = XMC_GPIO_PORT0, .pin_a = 6, .pin_b = 7,  .button = 8  },  // encoder 2: P0.6-P0.8
-    { .port = XMC_GPIO_PORT0, .pin_a = 9, .pin_b = 10, .button = 11 },  // encoder 3: P0.9-P0.11
+    { .pin_a = { ENCODER_0_CLK_PIN }, .pin_b = { ENCODER_0_DT_PIN }, .button_pin = { ENCODER_0_BUTTON_PIN } },
+    { .pin_a = { ENCODER_1_CLK_PIN }, .pin_b = { ENCODER_1_DT_PIN }, .button_pin = { ENCODER_1_BUTTON_PIN } },
+    { .pin_a = { ENCODER_2_CLK_PIN }, .pin_b = { ENCODER_2_DT_PIN }, .button_pin = { ENCODER_2_BUTTON_PIN } },
+    { .pin_a = { ENCODER_3_CLK_PIN }, .pin_b = { ENCODER_3_DT_PIN }, .button_pin = { ENCODER_3_BUTTON_PIN } },
 };
 
+// Pressing the knob pulls the button pin low, so pressed reads as 0.
+// No debouncing yet.
+static uint8_t button_is_held_down(const encoder_t *encoder) {
+    return read_pin(encoder->button_pin) == 0;
+}
+
+static uint8_t read_state(const encoder_t *encoder) {
+    return (read_pin(encoder->pin_a) << 1) | read_pin(encoder->pin_b);
+}
+
+// +1 for a clockwise step, -1 for a counter-clockwise step.
+// 0 when both pins changed at once: a step was missed, so the direction is unknown.
+static int8_t turn_direction(uint8_t previous_state, uint8_t current_state) {
+    uint8_t changed_pins = previous_state ^ current_state;
+    if (changed_pins == 0x3) return 0;
+
+    // Turning clockwise, the new B always equals the old A.
+    uint8_t previous_a = (previous_state >> 1) & 1;
+    uint8_t current_b = current_state & 1;
+    return (previous_a == current_b) ? 1 : -1;
+}
+
+// Called when the knob lands back in a detent. A full click is 4 steps, but 2 is
+// enough to count it, so one missed step does not lose the click.
+// Turning past either end of 0..ENCODER_STEPS does nothing.
+static void count_click(encoder_t *encoder) {
+    if      (encoder->steps_since_detent >=  2 && encoder->position < ENCODER_STEPS) encoder->position++;
+    else if (encoder->steps_since_detent <= -2 && encoder->position > 0)             encoder->position--;
+    encoder->steps_since_detent = 0;
+}
 
 static void poll_encoder(encoder_t *encoder) {
-    // the decoder sees either A change then B change or B change then A
-    // if we sample too slow it will look like both values changes at once
-    // Standard incremental encoders typically produce 12 to 24 pulses 
-    // (detents) per full rotation. We are the shaft by hand.
-    // sample rate >= margin x detents per revolution x state changes per 
-    // detent x max revolutions per second 
-    // ideally test this & calculate.. but google says that 1kHz is good enough
+    // read the button first: it must update even when the knob has not moved
+    encoder->is_pressed = button_is_held_down(encoder);
 
-    // button.. pull-up input, so released = 1 and pressed = 0 -> invert to get is_pressed.
-    // Must happen BEFORE the early return below, or it would only update while turning.
-    // No debounce yet: if is_pressed flickers during one press, it's contact bounce.
-    encoder->is_pressed = (XMC_GPIO_GetInput(encoder->port, encoder->button) == 0);
+    uint8_t current_state = read_state(encoder);
+    if (current_state == encoder->previous_state) return;
 
-    // read encoder the encoder.. pin A will be bit 1, and pin B will be bit 0
-    uint8_t curr = (XMC_GPIO_GetInput(encoder->port, encoder->pin_a) << 1) |
-                    XMC_GPIO_GetInput(encoder->port, encoder->pin_b);
+    encoder->steps_since_detent += turn_direction(encoder->previous_state, current_state);
+    encoder->previous_state = current_state;
 
-    if (curr == encoder->prev) return; // nothing moved
-
-    // A valid step changes exactly one bit
-    // case 1 ) Both bits changed then (prev ^ curr == 0b11)
-    // we ended up missing a sample so the direction is unknown and we should ignore it
-    // case 2) For a valid step, 
-    //  prevA XOR currB == 0 then +1 (CW), == 1 then -1 (CCW)
-    //   CW  sequence: 00 -> 10 -> 11 -> 01 -> 00   (B matches old A)
-    //   CCW sequence: 00 -> 01 -> 11 -> 10 -> 00   (B is opposite of old A)
-    uint8_t changed = encoder->prev ^ curr;
-    if (changed != 0x3) {
-        uint8_t prev_a = (encoder->prev >> 1) & 1;
-        uint8_t curr_b = curr & 1;
-        encoder->accum += (prev_a ^ curr_b) ? -1 : 1;
-    }
-    encoder->prev = curr;
-
-    // detent logic
-    // the encoder rests at 11 in each detent, increment only when we land 
-    // back in the 'detent'
-    // position is clamped to [ENCODER_MIN, ENCODER_MAX]: turning past an end does nothing
-    if (curr == 0x3) {
-        if      (encoder->accum >=  2 && encoder->position < ENCODER_MAX) encoder->position++;
-        else if (encoder->accum <= -2 && encoder->position > ENCODER_MIN) encoder->position--;
-        encoder->accum = 0;
-    }
+    if (current_state == DETENT_STATE) count_click(encoder);
 }
 
-// call every 1 ms from SysTick_Handler
+// called every 1 ms by poll_inputs()
 void poll_encoders(void) {
-    for (int i = 0; i < NUM_ENCODERS; i++) {
-        poll_encoder(&encoders[i]);
+    for (int encoder_index = 0; encoder_index < NUM_ENCODERS; encoder_index++) {
+        poll_encoder(&encoders[encoder_index]);
     }
 }
 
-// read-only access for other hardware
-int32_t encoder_get_position(int index) {
-    return encoders[index].position;
+// Knob value, 0.0 (fully down) to 1.0 (fully up).
+// The position is still counted in whole clicks (an integer never drifts);
+// only this getter turns it into the 0..1 the effects want.
+float encoder_get_knob(int index) {
+    return (float)encoders[index].position / ENCODER_STEPS;
+}
+
+// Moves a knob to the nearest click. An encoder has no end stops, so the
+// firmware can put it anywhere, e.g. back where an effect was left.
+void encoder_set_knob(int index, float knob) {
+    if (knob < 0.0f) knob = 0.0f;
+    if (knob > 1.0f) knob = 1.0f;
+    encoders[index].position = (int32_t)(knob * ENCODER_STEPS + 0.5f);
 }
 
 uint8_t encoder_is_pressed(int index) {

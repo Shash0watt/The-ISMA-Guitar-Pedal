@@ -13,7 +13,7 @@
 #include "fx_common.h"
 
 typedef struct {
-    fx_smoothed_t gain_mult; /* multiplier applied to every sample, glides on change */
+    fx_smoothed_t gain; /* multiplier applied to every sample, glides on change */
 } fx_boost_t;
 
 void fx_boost_init(fx_boost_t *state, float sample_rate);

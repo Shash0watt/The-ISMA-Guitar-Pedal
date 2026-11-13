@@ -37,156 +37,52 @@
 *                                                                              
 *****************************************************************************/
 
-#include "cybsp.h"
-#include "cy_utils.h"
-#include "xmc_gpio.h"
+// Guitar pedal firmware. The audio engine (api/audio) runs in an interrupt:
+// audio in (P14.0) -> effect -> audio out (P14.8). The loop below polls the
+// encoders and buttons every 1 ms, and every 50 ms checks the on-board buttons
+// and updates the meters and LEDs. Each step is a function in main_helpers.c.
+//
+// Every boot plays a 1 kHz beep for 1 s, then switches to passthrough.
+//
+// BUTTON1 (P15.13) cycles the audio test mode. LED1 shows which one:
+//   passthrough   slow blink (1 Hz)   in -> effect -> out: normal playing
+//   sine          fast blink (5 Hz)   1 kHz tone: tests the output circuit alone
+//   silence       solid on            output held at mid-scale: anything you
+//                                     still hear is analog noise or hum
+//
+// BUTTON2 (P15.12) steps to the next effect (see api/pedal/pedal.c). The
+// effect is heard in passthrough mode and the encoders are its knobs.
+//
+// LED2 shows the signal:
+//   fast blink (10 Hz)   input bias is wrong: P14.0 averages far from 1.65 V
+//                        (check the 10k/10k divider and its 3.3 V wire)
+//   on                   signal present on the output
+//   off                  bias OK, silence
+//
+// Debugger (Live Watch): dbg_mode, dbg_in_mean (~2048), dbg_out_peak.
+
 #include "api/board.h"
-#include <stdio.h>
-
-// enable printing over uart
-int _write(int file, char *ptr, int len)
-{
-   (void)file;
-   for (int i = 0; i < len; i++){
-       if (ptr[i] == '\n'){
-           XMC_UART_CH_Transmit(CYBSP_DEBUG_UART_HW, '\r');
-       }
-       XMC_UART_CH_Transmit(CYBSP_DEBUG_UART_HW, ptr[i]);
-   }
-   return len;
-}
-
-
-/* ===================== Audio bring-up firmware =====================
- *
- * One flash that tests the whole chain. BUTTON1 (P15.13, on the Relax Kit)
- * cycles through three modes:
- *
- *   PASSTHROUGH  (default)  P14.0 -> P14.8. You should hear your music.
- *                           LED1 blinks slowly (1 Hz).
- *   SINE         1 kHz tone on P14.8. Tests the output circuit alone.
- *                           LED1 blinks fast (5 Hz).
- *   SILENCE      DAC held at mid-scale. Whatever you hear now is analog
- *                noise/hum from the output circuit or grounding, not audio.
- *                           LED1 solid on.
- *
- * Every boot starts with a 1 s 1 kHz beep, then switches to PASSTHROUGH.
- * If you hear the beep, the DAC + output circuit + headphones all work.
- *
- * LED2 shows the INPUT side:
- *   fast blink (10 Hz)  input bias is wrong: P14.0 average is far from 1.65 V
- *                       (check the 10k/10k divider and its 3.3 V wire)
- *   on                  signal present on the DAC output
- *   off                 bias OK, silence
- *
- * Debugger (Live Watch): dbg_mode, dbg_in_mean (~2048), dbg_out_peak.
- *
- * The encoders and buttons (api/digital_inputs) are polled every 1 ms from
- * the main loop via poll_inputs().
- * ==================================================================== */
-
-typedef enum { MODE_PASSTHROUGH = 0, MODE_SINE, MODE_SILENCE, MODE_COUNT } bringup_mode_t;
-
-#define BOOT_BEEP_MS        1000U
-#define TICK_MS             50U       // LED / button update period
-#define SIGNAL_THRESHOLD    64U       // DAC counts from mid-scale (~35 mV)
-#define BIAS_LOW            1700U     // healthy bias is ~2048 (1.65 V)
-#define BIAS_HIGH           2400U
-
-volatile bringup_mode_t   dbg_mode;
-volatile uint16_t dbg_in_mean;
-volatile uint16_t dbg_out_peak;
-
-static void set_mode(bringup_mode_t m)
-{
-    static const audio_test_mode_t map[MODE_COUNT] = {
-        [MODE_PASSTHROUGH] = AUDIO_TEST_NONE,
-        [MODE_SINE]        = AUDIO_TEST_SINE_1K,
-        [MODE_SILENCE]     = AUDIO_TEST_MIDSCALE,
-    };
-    audio_set_test_mode(map[m]);
-    dbg_mode = m;
-}
-
-static void led(XMC_GPIO_PORT_t *port, uint8_t pin, bool on)
-{
-    if (on) { XMC_GPIO_SetOutputHigh(port, pin); }
-    else    { XMC_GPIO_SetOutputLow(port, pin); }
-}
+#include "main_helpers.h"
 
 int main(void)
 {
-    cy_rslt_t result;
-    /* Initialize the device and board peripherals */
-    result = cybsp_init();
-    if (result != CY_RSLT_SUCCESS)
-    {
-        CY_ASSERT(0);
-    }
-
+    init_board();
     init_audio(AUDIO_SAMPLE_RATE_HZ);
-
-    bringup_mode_t   mode       = MODE_SINE;                  // boot beep
-    uint32_t beep_ticks = BOOT_BEEP_MS / TICK_MS;
-    set_mode(mode);
-
-    // The loop wakes every 1 ms (counted in audio samples): inputs are polled
-    // every 1 ms, the LEDs / BUTTON1 / meters every TICK_MS.
-    const uint32_t ms_samples = AUDIO_SAMPLE_RATE_HZ / 1000U;
-    uint32_t next_ms = ms_samples;
-    uint32_t ms      = 0;
-    uint32_t ticks   = 0;
-    bool     btn_was_down = false;
+    init_pedal();
+    start_boot_beep();
 
     for (;;)
     {
-        if ((int32_t)(audio_sample_count() - next_ms) < 0) { continue; }
-        next_ms += ms_samples;
+        wait_for_next_millisecond();
+        poll_inputs();
+        poll_pedal();
 
-        poll_inputs();                              // encoders + buttons, every 1 ms
-
-        if (++ms % TICK_MS != 0) { continue; }
-        ticks++;
-
-        /* End of boot beep -> passthrough */
-        if (beep_ticks && --beep_ticks == 0)
-        {
-            mode = MODE_PASSTHROUGH;
-            set_mode(mode);
-        }
-
-        /* BUTTON1: next mode on press (polling every 50 ms debounces it) */
-        bool btn_down = XMC_GPIO_GetInput(CYBSP_USER_BTN_PORT, CYBSP_USER_BTN_PIN)
-                        == CYBSP_BTN_PRESSED;
-        if (btn_down && !btn_was_down)
-        {
-            beep_ticks = 0;
-            mode = (bringup_mode_t)((mode + 1) % MODE_COUNT);
-            set_mode(mode);
-        }
-        btn_was_down = btn_down;
-
-        /* Meters */
-        uint16_t in_mean  = audio_in_mean();
-        uint16_t out_peak = audio_out_peak();
-        dbg_in_mean  = in_mean;
-        dbg_out_peak = out_peak;
-
-        /* LED1: which mode */
-        bool led1;
-        switch (mode)
-        {
-            case MODE_PASSTHROUGH: led1 = (ticks / 10) & 1; break;  // 1 Hz
-            case MODE_SINE:        led1 = (ticks / 2)  & 1; break;  // 5 Hz
-            default:               led1 = true;             break;  // solid
-        }
-        led(CYBSP_USER_LED_PORT, CYBSP_USER_LED_PIN, led1);
-
-        /* LED2: input health / signal present */
-        bool bias_bad = (in_mean < BIAS_LOW) || (in_mean > BIAS_HIGH);
-        bool led2 = bias_bad ? (ticks & 1)                   // 10 Hz blink
-                             : (out_peak > SIGNAL_THRESHOLD);
-        led(CYBSP_USER_LED2_PORT, CYBSP_USER_LED2_PIN, led2);
+        if (!status_tick_is_due()) { continue; }    // every 50 ms
+        end_boot_beep_when_done();
+        handle_test_mode_button();
+        handle_effect_button();
+        update_meters();
+        update_status_leds();
     }
 }
 

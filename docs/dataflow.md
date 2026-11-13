@@ -1,93 +1,96 @@
 # Dataflow
 
-How audio moves through the pedal, and how the same effects code is tested on a
-computer before it runs on the XMC4700.
+_Last updated: 2026-11-12. If the code has changed since then, check this page
+against it before trusting the details._
 
-## Overview: one effects library, two homes
+How audio and knob movements travel through the pedal firmware on the XMC4700.
 
-The code in `effects/` is plain C with no hardware access. On the Mac it is fed
-from WAV files; on the pedal it is fed from the ADC. Only the outer boxes change.
+## Signal path
 
-```mermaid
-flowchart TB
-    subgraph mac["Mac test harness (host/)"]
-        direction TB
-        inwav["in.wav<br/>dry guitar recording"] --> rd["dr_wav read<br/>float samples -1..1"]
-        wr["dr_wav write<br/>float WAV"] --> outwav["out.wav<br/>listen and compare"]
-    end
-
-    subgraph fx["effects/ (same C code on both)"]
-        direction LR
-        boost["Boost"] --> od["Overdrive"] --> trem["Tremolo"] --> dly["Delay"]
-    end
-
-    subgraph pedal["Pedal firmware (XMC4700)"]
-        direction TB
-        guitar["Guitar<br/>through input buffer"] --> adc["ADC + DMA<br/>fills 32-sample blocks"]
-        dac["DAC + DMA<br/>sends block out"] --> amp["Amp<br/>through output filter"]
-    end
-
-    rd --> boost
-    adc --> boost
-    dly --> wr
-    dly --> dac
-
-    classDef host fill:#E1F5EE,stroke:#0F6E56,color:#085041
-    classDef fw fill:#EEEDFE,stroke:#534AB7,color:#3C3489
-    classDef shared fill:#FAECE7,stroke:#993C1D,color:#712B13
-    class inwav,rd,wr,outwav host
-    class guitar,adc,dac,amp fw
-    class boost,od,trem,dly shared
-```
-
-## Pedal: real-time signal path
-
-Audio moves in blocks. DMA fills one half of a buffer while the CPU processes the
-other half, then they swap. Knobs are read separately at a much slower rate.
+Audio is handled one sample at a time. An interrupt fires 96,000 times a second;
+each time it reads one sample from the ADC, runs the current effect on it, and
+writes the result to the DAC.
 
 ```mermaid
-flowchart TB
-    subgraph audio_in["Audio in"]
-        direction LR
-        g["Guitar<br/>pickup signal"] --> ibuf["Input buffer<br/>bias to mid-rail"] --> adc["ADC / codec<br/>48 kHz"] --> dmain["DMA in buffer<br/>ping-pong halves"]
+flowchart LR
+    subgraph analog_in["Analog in"]
+        direction TB
+        source["Guitar<br/>or line source"] --> bias["Input circuit<br/>bias to 1.65 V"]
     end
 
-    subgraph isr["Audio interrupt: every 32 samples (0.67 ms)"]
-        direction LR
-        i2f["Int to float<br/>scale to -1..1"] --> chain["Effects chain<br/>effects/ code"] --> f2i["Float to int<br/>clamp, scale to DAC"]
+    subgraph interrupt["Audio interrupt: once per sample (96 kHz)"]
+        direction TB
+        adc["Read ADC<br/>12-bit, 4x averaged"] --> to_float["Int to float<br/>scale to -1..1"]
+        to_float --> effect["Current effect<br/>api/effects"]
+        effect --> to_int["Float to int<br/>clip to 12 bits"]
+        to_int --> dac["Write DAC"]
     end
 
-    subgraph audio_out["Audio out"]
-        direction LR
-        dmaout["DMA out buffer<br/>ping-pong halves"] --> dac["DAC / codec<br/>48 kHz"] --> ofilt["Output filter<br/>smooth, block DC"] --> amp["Amp<br/>or headphones"]
+    subgraph analog_out["Analog out"]
+        direction TB
+        output["Output circuit"] --> amp["Amp<br/>or headphones"]
     end
 
-    subgraph controls["Controls (slow, about 100 Hz)"]
-        direction LR
-        pots["Pots + footswitch<br/>slow ADC, GPIO"] --> mainloop["Main loop<br/>set_knob(), bypass"]
-    end
-
-    dmain --> i2f
-    f2i --> dmaout
-    mainloop -. "knob values" .-> chain
+    bias --> adc
+    dac --> output
 
     classDef analog fill:#F1EFE8,stroke:#5F5E5A,color:#444441
-    classDef fw fill:#EEEDFE,stroke:#534AB7,color:#3C3489
-    classDef shared fill:#FAECE7,stroke:#993C1D,color:#712B13
-    class g,ibuf,ofilt,amp,pots analog
-    class adc,dmain,i2f,f2i,dmaout,dac,mainloop fw
-    class chain shared
+    classDef firmware fill:#EEEDFE,stroke:#534AB7,color:#3C3489
+    classDef effects fill:#FAECE7,stroke:#993C1D,color:#712B13
+    class source,bias,output,amp analog
+    class adc,to_float,to_int,dac firmware
+    class effect effects
 ```
 
-Colors: gray = analog hardware, purple = XMC4700 firmware, coral = shared effects
-code, teal = Mac-only test code.
+## Controls
+
+Knobs and buttons are slow compared with audio, so they are read from the main
+loop instead of the interrupt. The main loop does the slow math (turning a knob
+value into a gain) and hands the effect a single finished number.
+
+```mermaid
+flowchart LR
+    encoders["Encoders<br/>turn and press"] --> poll["poll_inputs()<br/>every 1 ms"]
+    poll --> knob["Knob value<br/>0.0 to 1.0"]
+    knob --> pedal["poll_pedal()<br/>sends changes on"]
+    pedal --> setter["Effect setter<br/>knob to gain"]
+    setter -. "smoothed over ~50 ms" .-> effect["Current effect<br/>in the audio interrupt"]
+
+    button2["BUTTON2"] --> next["pedal_next_effect()<br/>bypass, boost, overdrive"]
+    next --> effect
+
+    classDef analog fill:#F1EFE8,stroke:#5F5E5A,color:#444441
+    classDef firmware fill:#EEEDFE,stroke:#534AB7,color:#3C3489
+    classDef effects fill:#FAECE7,stroke:#993C1D,color:#712B13
+    class encoders,button2 analog
+    class poll,knob,pedal,next firmware
+    class setter,effect effects
+```
+
+Colors: gray = hardware, purple = firmware, coral = effects code.
+
+Each effect remembers its own knob values. Encoders have no marks or end stops,
+so switching effects moves the knobs to where that effect was left.
+
+## Where the code lives
+
+| Folder | What it does |
+|---|---|
+| `main.c`, `main_helpers.c` | Start-up and the main loop |
+| `api/audio` | The audio interrupt: ADC, effect, DAC, and the test modes |
+| `api/adc`, `api/dac` | The converters |
+| `api/digital_inputs` | Encoders and buttons |
+| `api/pedal` | Which effect is on, and which knob controls what |
+| `api/effects` | The effects themselves: plain math, no hardware access |
 
 ## Key numbers
 
 | | Value | Why |
 |---|---|---|
-| Sample rate | 48 kHz | Covers hearing range (up to 24 kHz) with room for the anti-alias filter; standard for codecs |
-| Block size | 32 samples per half | 0.67 ms per block keeps latency low; Lab7 used 256 (about 5 ms) |
-| CPU budget | about 96,000 cycles per block | 144 MHz / 48 kHz = 3,000 cycles per sample |
-| Sample format | `float`, -1..1 | Cortex-M4F has a single-precision FPU; `double` runs in software |
-| Knob rate | about 100 Hz | Knobs are slow; values are smoothed inside each effect to avoid clicks |
+| Sample rate | 96 kHz | Keeps the DAC's stair-step artifacts far above hearing |
+| Latency | 1 sample (about 10 microseconds) | Each sample is processed as soon as it is read |
+| CPU budget | about 1,500 cycles per sample | 144 MHz / 96 kHz |
+| Sample format in effects | `float`, -1..1 | The chip has a single-precision FPU; `double` runs in slow software |
+| Converters | 12-bit in, 12-bit out | Built into the XMC4700 |
+| Knob polling | every 1 ms | Fast enough to never miss an encoder click |
+| Knob smoothing | 10 Hz | Changes glide over about 50 ms so they do not click |

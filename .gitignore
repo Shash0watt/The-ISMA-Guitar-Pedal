@@ -152,9 +152,6 @@ ehthumbs.db
 ehthumbs_vista.db
 [Dd]esktop.ini
 
-# Mac test harness output
-host/out/
-
 # Editor/tool caches and lock files
 .cache/
 *.modus.lock

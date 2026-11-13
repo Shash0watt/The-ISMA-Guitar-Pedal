@@ -151,3 +151,7 @@ Thumbs.db:encryptable
 ehthumbs.db
 ehthumbs_vista.db
 [Dd]esktop.ini
+
+# Editor/tool caches and lock files
+.cache/
+*.modus.lock

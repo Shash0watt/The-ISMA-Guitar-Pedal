@@ -8,94 +8,136 @@
 extern "C" {
 #endif
 
-// === Pin Setup ===
-// P14.0  audio in  (VADC G0CH0)        see api/adc
-// P14.8  audio out (DAC0)              see api/dac
-// P14.9  reserved  (DAC1, future stereo)
-// P5.9   LED1 (BSP: CYBSP_USER_LED)   heartbeat, 1 Hz while audio runs
-// P5.8   LED2 (BSP: CYBSP_USER_LED2)  on while the DAC output carries signal
+// === Pins ===
+// Every pin the pedal uses, named once here; the rest of the code only uses
+// these names. Each name stands for a port and a pin number together (P0_2
+// means "XMC_GPIO_PORT0, 2"), so it can be passed straight to an XMC_GPIO
+// function or used to fill in a pin_t.
 
-// === Digital inputs ===
-// Polled every 1 ms by poll_inputs(), which main() calls from its loop.
-// (SysTick belongs to the audio engine, so the inputs no longer get their own
-// SysTick interrupt. Main-loop polling also makes printf safe in there.)
+// Audio. These two are fixed by the chip: P14.0 is the ADC input used
+// (group 0, channel 0) and P14.8 is the output of DAC0.
+#define AUDIO_INPUT_PIN         P14_0   // biased to 1.65 V
+#define AUDIO_OUTPUT_PIN        P14_8
 
-// --- input polling ---
-void poll_inputs(void); // call every 1 ms. UPDATE THIS WHENEVER A NEW INPUT IS ADDED
+// KY-040 encoders: CLK and DT are the two turn signals. Encoder and button
+// pins read low when active. Their pull-ups come from the board config
+// (Device Configurator), so a pin moved off P0 needs a pull-up set there too.
+#define ENCODER_0_CLK_PIN       P0_0
+#define ENCODER_0_DT_PIN        P0_1
+#define ENCODER_0_BUTTON_PIN    P0_2
+#define ENCODER_1_CLK_PIN       P0_3
+#define ENCODER_1_DT_PIN        P0_4
+#define ENCODER_1_BUTTON_PIN    P0_5
+#define ENCODER_2_CLK_PIN       P0_6
+#define ENCODER_2_DT_PIN        P0_7
+#define ENCODER_2_BUTTON_PIN    P0_8
+#define ENCODER_3_CLK_PIN       P0_9
+#define ENCODER_3_DT_PIN        P0_10
+#define ENCODER_3_BUTTON_PIN    P0_11
 
-// --- rotary encoder ---
-#define NUM_ENCODERS 4// must match the number of entries in encoders[] (rotary_encoder.c)
-#define ENCODER_MIN 0            // lowest position an encoder can reach
-#define ENCODER_MAX 100          // highest position an encoder can reach
-extern void poll_encoders(void); // poll every encoder (called by poll_inputs)
-extern int32_t encoder_get_position(int index);
-extern uint8_t encoder_is_pressed(int index);
+#define BUTTON_0_PIN            P0_15
+#define BUTTON_1_PIN            P0_14
+#define BUTTON_2_PIN            P0_13
+#define BUTTON_3_PIN            P0_12
 
-// --- buttons ---
-#define NUM_BUTTONS 4 // must match the number of entries in buttons[] (buttons.c)
-extern void poll_buttons(void); // poll every button (called by poll_inputs)
-extern uint8_t button_is_pressed(int index); // 1 while button[index] is held down
+// On the Relax Kit itself.
+#define TEST_MODE_BUTTON_PIN    P15_13  // BUTTON1
+#define NEXT_EFFECT_BUTTON_PIN  P15_12  // BUTTON2
+#define TEST_MODE_LED_PIN       P5_9    // LED1
+#define SIGNAL_LED_PIN          P5_8    // LED2: input health / signal present
+
+// printf goes out the board's debug UART (P1.5 TX, P1.4 RX, 115200 baud),
+// which the board config sets up.
+
+// A pin stored in a table: fill it in with one of the names above.
+typedef struct {
+    XMC_GPIO_PORT_t *port;
+    uint8_t number;
+} pin_t;
+
+// 1 when the pin is high, 0 when it is low.
+static inline uint32_t read_pin(pin_t pin)
+{
+    return XMC_GPIO_GetInput(pin.port, pin.number);
+}
 
 
-// === Audio (api/audio) ===
-// Sample engine. Owns SysTick, running at the sample rate with NVIC priority 0
-// (highest). Every other timer/interrupt must use a LOWER priority (a larger number).
-// Each tick: read ADC -> effect -> write DAC. One sample of latency.
-// Samples passed to effects are centered on 0: -2048..2047 (12-bit).
+// === Digital inputs (api/digital_inputs) ===
+// Read from the main loop, not from an interrupt, so printf is safe there.
 
-// 96 kHz: keeps the DAC's stair-step treble loss and images far above the
-// audio band. Set back to 48000U to halve the ISR load.
+void poll_inputs(void);  // call every 1 ms; add any new input to it
+
+// Each encoder is a knob that reads 0.0 (fully down) to 1.0 (fully up), like a
+// pot. The effects take their knobs in that same 0..1 form, so nothing in
+// between has to convert. (This replaced encoder_get_position() and its 0..100
+// range, which every caller had to divide by 100.)
+#define NUM_ENCODERS 4    // must match encoders[] in rotary_encoder.c
+#define ENCODER_STEPS 40  // clicks from 0.0 to 1.0: two full turns of a 20-click KY-040
+void poll_encoders(void);
+float encoder_get_knob(int index);             // 0.0 .. 1.0
+void encoder_set_knob(int index, float knob);  // move a knob, e.g. to an effect's saved setting
+uint8_t encoder_is_pressed(int index);         // 1 while the knob is pushed in
+
+#define NUM_BUTTONS 4     // must match buttons[] in buttons.c
+void poll_buttons(void);
+uint8_t button_is_pressed(int index);          // 1 while the button is held down
+
+
+// === Audio engine (api/audio) ===
+// An interrupt at the sample rate: read ADC -> effect -> write DAC.
+// It owns SysTick at the highest priority (0); every other interrupt must use
+// a lower priority (a larger number) or the audio will glitch.
+
+// 96 kHz keeps the DAC's stair-step artifacts far above what we can hear.
+// 48000U halves the processor load.
 #define AUDIO_SAMPLE_RATE_HZ 96000U
 
-// Effect callback: takes one input sample, returns one output sample (both
-// centered on 0). Runs inside the sample ISR: keep it short (< ~1200 cycles
-// at 96 kHz, < ~2500 at 48 kHz) and never block. The output is clipped to 12 bits for you.
+// An effect takes one sample and returns one sample, both centered on 0
+// (-2048..2047). It runs inside the audio interrupt, so it must be quick
+// (under ~1200 CPU cycles at 96 kHz) and never wait. The result is clipped
+// to 12 bits for you.
 typedef int32_t (*audio_effect_t)(int32_t sample);
 
 typedef enum {
     AUDIO_TEST_NONE = 0,   // normal: ADC -> effect -> DAC
-    AUDIO_TEST_MIDSCALE,   // DAC holds 2048 (~1.4 V DC on P14.8)
-    AUDIO_TEST_SINE_1K,    // DAC plays a 1 kHz sine (2048 +/- 1000), any sample rate
+    AUDIO_TEST_MIDSCALE,   // DAC holds mid-scale: silence
+    AUDIO_TEST_SINE_1K,    // DAC plays a 1 kHz sine
 } audio_test_mode_t;
 
-// Inits ADC + DAC and starts the sample interrupt. Call once, after cybsp_init().
-void init_audio(uint32_t sample_rate_hz);
-
-// Install an effect. NULL = straight passthrough (the default).
-void audio_set_effect(audio_effect_t effect);
-
-// Bring-up test modes. The ADC is still sampled in every mode.
+void init_audio(uint32_t sample_rate_hz);          // call once, after cybsp_init()
+void audio_set_effect(audio_effect_t effect);      // NULL = straight passthrough (the default)
 void audio_set_test_mode(audio_test_mode_t mode);
+uint32_t audio_sample_count(void);                 // samples since init (wraps around)
 
-// Samples processed since init (wraps). Increments by sample_rate each second.
-uint32_t audio_sample_count(void);
+// Meters. Reading one clears it, so each call covers the time since the last.
+uint16_t audio_out_peak(void);  // loudest output, 0..2048 counts from mid-scale
+uint16_t audio_in_mean(void);   // average input, 0..4095; ~2048 when the bias is right
 
-// Peak DAC deviation from mid-scale, |out - 2048| (0..2048), since the last
-// call. Reading clears it. Silence reads near 0; the 1 kHz test reads ~1000.
-uint16_t audio_out_peak(void);
 
-// Average ADC input (0..4095) since the last call. Reading clears it.
-// With the input silent this is the bias level: ~2048 if the divider is right.
-uint16_t audio_in_mean(void);
+// === Pedal (api/pedal) ===
+// Runs one effect from api/effects on the live audio and connects the knobs to
+// it. Which knob does what is listed at the top of api/pedal/pedal.c.
+
+void init_pedal(void);         // call once, after init_audio()
+void poll_pedal(void);         // call every 1 ms: sends knob changes to the effect
+void pedal_next_effect(void);  // bypass -> boost -> overdrive -> bypass ...
 
 
 // === ADC (api/adc) ===
-// VADC group 0, channel 0 on P14.0. 12-bit, 1.65 V bias -> ~2048 on silence.
-// Each adc_start_conversion() runs ADC_OVERSAMPLE conversions (~1 us each)
-// and adc_read() returns their average. 4x averaging = +6 dB SNR. Set to 1 to undo.
+// 12-bit. Each sample is the average of ADC_OVERSAMPLE quick conversions;
+// averaging 4 halves the noise.
 #define ADC_OVERSAMPLE 4   // 1, 2 or 4
 
 void init_adc(void);
 void adc_start_conversion(void);
-uint16_t adc_read(void);               // latest result, 0..4095
+uint16_t adc_read(void);        // 0..4095, from the conversion started last
 
 
 // === DAC (api/dac) ===
-// DAC0 on P14.8. Single-value mode: a write updates the pin immediately.
-// 0..4095 -> ~0.3..2.5 V.
+// A write changes the output pin immediately. 0..4095 -> about 0.3..2.5 V.
 
 void init_dac(void);
-void dac_write(uint16_t code);         // 0..4095 (upper bits ignored)
+void dac_write(uint16_t code);  // 0..4095
 
 #ifdef __cplusplus
 }

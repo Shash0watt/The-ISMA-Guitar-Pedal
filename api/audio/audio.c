@@ -1,102 +1,139 @@
-// Audio sample engine: SysTick ISR at the sample rate, ADC -> effect -> DAC.
-// See api/README.md.
+// Audio sample engine: SysTick interrupt at the sample rate, ADC -> effect -> DAC.
 #include "../board.h"
 #include "cybsp.h"
 
-#define AUDIO_MID 2048
+#define AUDIO_MID    2048                   // 12-bit mid-scale = silence
+#define DAC_MAX_CODE 4095
 
-// Debug: watch these in the debugger (Live Watch) during bring-up.
-//   audio_in_last  ~2048 on silence, ~1500..2600 with 1 Vrms music.
+#define SINE_TABLE_LENGTH      48U
+#define SINE_TEST_FREQUENCY_HZ 1000U
+// The sine phase is a table index in 16.16 fixed point; it wraps after one cycle.
+#define SINE_PHASE_WRAP ((uint32_t)SINE_TABLE_LENGTH << 16)
+
+// Watch these in the debugger (Live Watch) during bring-up.
+// audio_in_last reads ~2048 on silence, ~1500..2600 with 1 Vrms music.
 volatile uint16_t audio_in_last;
 volatile uint16_t audio_out_last;
 
 static volatile uint32_t sample_count;
-static volatile uint32_t in_sum, in_n;                      // for audio_in_mean()
-static volatile uint16_t out_peak;                         // max |out - 2048| since last read
+static volatile uint32_t input_sum, input_count;            // for audio_in_mean()
+static volatile uint16_t output_peak;                       // for audio_out_peak()
 static volatile audio_effect_t current_effect;              // NULL = passthrough
 static volatile audio_test_mode_t test_mode = AUDIO_TEST_NONE;
-static uint32_t sine_step;                                  // table step per sample, 16.16 fixed point
+static uint32_t sine_phase_step;                            // table entries per sample, 16.16
 
-// One sine cycle, 48 points, 2048 +/- 1000 counts. Stepped to give 1 kHz.
-static const uint16_t sine48[48] = {
+// One sine cycle, 2048 +/- 1000 counts.
+static const uint16_t sine_table[SINE_TABLE_LENGTH] = {
     2048, 2179, 2307, 2431, 2548, 2657, 2755, 2841, 2914, 2972, 3014, 3039,
     3048, 3039, 3014, 2972, 2914, 2841, 2755, 2657, 2548, 2431, 2307, 2179,
     2048, 1917, 1789, 1665, 1548, 1439, 1341, 1255, 1182, 1124, 1082, 1057,
     1048, 1057, 1082, 1124, 1182, 1255, 1341, 1439, 1548, 1665, 1789, 1917,
 };
 
+// SysTick counts core clocks: 144 MHz / 96 kHz = 1500 per sample.
+// Priority 0 is the highest, so nothing delays a sample.
+static void start_sample_interrupt(uint32_t sample_rate_hz)
+{
+    SysTick_Config(SystemCoreClock / sample_rate_hz);
+    NVIC_SetPriority(SysTick_IRQn, 0);
+}
+
 void init_audio(uint32_t sample_rate_hz)
 {
     init_dac();
     init_adc();
 
-    // 1 kHz: advance 48 * 1000 / rate table entries per sample (0.5 at 96 kHz)
-    sine_step = (uint32_t)(((uint64_t)48U * 1000U << 16) / sample_rate_hz);
+    // Table entries to advance per sample for a 1 kHz tone (0.5 at 96 kHz).
+    sine_phase_step = (uint32_t)(((uint64_t)SINE_TABLE_LENGTH * SINE_TEST_FREQUENCY_HZ << 16)
+                                 / sample_rate_hz);
 
-    // 144 MHz / 96 kHz = 1500 core clocks per sample. Highest priority.
-    SysTick_Config(SystemCoreClock / sample_rate_hz);
-    NVIC_SetPriority(SysTick_IRQn, 0);
+    start_sample_interrupt(sample_rate_hz);
 }
 
-void audio_set_effect(audio_effect_t effect)    { current_effect = effect; }
+void audio_set_effect(audio_effect_t effect)     { current_effect = effect; }
 void audio_set_test_mode(audio_test_mode_t mode) { test_mode = mode; }
 uint32_t audio_sample_count(void)                { return sample_count; }
 
+// The two meter reads below turn interrupts off for a few cycles so the sample
+// interrupt cannot change a meter between reading it and clearing it.
 uint16_t audio_in_mean(void)
 {
     __disable_irq();
-    uint32_t sum = in_sum, n = in_n;
-    in_sum = 0; in_n = 0;
+    uint32_t sum = input_sum, count = input_count;
+    input_sum = 0; input_count = 0;
     __enable_irq();
-    return n ? (uint16_t)(sum / n) : 0;
+    return count ? (uint16_t)(sum / count) : 0;
 }
 
 uint16_t audio_out_peak(void)
 {
-    __disable_irq();                // a few cycles; keeps read + clear atomic
-    uint16_t p = out_peak;
-    out_peak = 0;
+    __disable_irq();
+    uint16_t peak = output_peak;
+    output_peak = 0;
     __enable_irq();
-    return p;
+    return peak;
+}
+
+// --- Steps of the sample interrupt ---
+// __STATIC_FORCEINLINE (CMSIS) is `static inline` that the compiler must obey.
+// The Debug build (-Og) leaves plain `static inline` as real calls, which
+// would cost cycles on every sample.
+
+__STATIC_FORCEINLINE uint16_t next_test_sine_sample(void)
+{
+    static uint32_t phase;
+    uint16_t sample = sine_table[phase >> 16];
+    phase += sine_phase_step;
+    if (phase >= SINE_PHASE_WRAP) { phase -= SINE_PHASE_WRAP; }
+    return sample;
+}
+
+__STATIC_FORCEINLINE uint16_t clamp_to_dac_range(int32_t sample)
+{
+    if (sample < 0)            { sample = 0; }
+    if (sample > DAC_MAX_CODE) { sample = DAC_MAX_CODE; }
+    return (uint16_t)sample;
+}
+
+// Effects work on samples centered on 0, so remove the mid-scale offset going
+// in and add it back coming out.
+__STATIC_FORCEINLINE uint16_t run_effect(uint16_t input_sample)
+{
+    int32_t sample = (int32_t)input_sample - AUDIO_MID;
+    audio_effect_t effect = current_effect;
+    if (effect) { sample = effect(sample); }
+    return clamp_to_dac_range(sample + AUDIO_MID);
+}
+
+__STATIC_FORCEINLINE uint16_t next_output_sample(uint16_t input_sample)
+{
+    if (test_mode == AUDIO_TEST_MIDSCALE) { return AUDIO_MID; }
+    if (test_mode == AUDIO_TEST_SINE_1K)  { return next_test_sine_sample(); }
+    return run_effect(input_sample);
+}
+
+// Peak = largest output distance from mid-scale. Mean = input sum / input count.
+__STATIC_FORCEINLINE void update_meters(uint16_t input_sample, uint16_t output_sample)
+{
+    uint16_t output_deviation = (output_sample >= AUDIO_MID) ? (output_sample - AUDIO_MID)
+                                                             : (AUDIO_MID - output_sample);
+    if (output_deviation > output_peak) { output_peak = output_deviation; }
+    input_sum += input_sample; input_count++;
+
+    audio_in_last  = input_sample;
+    audio_out_last = output_sample;
+    sample_count++;
 }
 
 void SysTick_Handler(void)
 {
-    // Result of the conversions started last tick (done ~4 us after it),
-    // then start the next one right away so the sample instant stays fixed.
-    uint16_t in = adc_read();
+    // This reads the conversion started on the previous tick (finished ~4 us
+    // after it). Starting the next one first thing keeps the sample instant fixed.
+    uint16_t input_sample = adc_read();
     adc_start_conversion();
 
-    uint16_t out;
-    if (test_mode == AUDIO_TEST_MIDSCALE)
-    {
-        out = AUDIO_MID;
-    }
-    else if (test_mode == AUDIO_TEST_SINE_1K)
-    {
-        static uint32_t phase;                  // 16.16 index into sine48
-        out = sine48[phase >> 16];
-        phase += sine_step;
-        if (phase >= (48UL << 16)) { phase -= (48UL << 16); }
-    }
-    else
-    {
-        int32_t y = (int32_t)in - AUDIO_MID;
-        audio_effect_t fx = current_effect;
-        if (fx) { y = fx(y); }
-        y += AUDIO_MID;
-        if (y < 0)    { y = 0; }
-        if (y > 4095) { y = 4095; }
-        out = (uint16_t)y;
-    }
+    uint16_t output_sample = next_output_sample(input_sample);
+    dac_write(output_sample);
 
-    dac_write(out);
-
-    uint16_t dev = (out >= AUDIO_MID) ? (out - AUDIO_MID) : (AUDIO_MID - out);
-    if (dev > out_peak) { out_peak = dev; }
-    in_sum += in; in_n++;
-
-    audio_in_last  = in;
-    audio_out_last = out;
-    sample_count++;
+    update_meters(input_sample, output_sample);
 }

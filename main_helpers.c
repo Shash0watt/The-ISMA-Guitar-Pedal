@@ -11,15 +11,17 @@ typedef enum { MODE_PASSTHROUGH = 0, MODE_SINE, MODE_SILENCE, MODE_COUNT } bring
 
 #define BOOT_BEEP_MS            1000U
 #define STATUS_TICK_MS          50U       // LED / button / meter update period
-#define SIGNAL_THRESHOLD        64U       // DAC counts from mid-scale (~35 mV)
-#define BIAS_LOW                1700U     // healthy bias is ~2048 (1.65 V)
-#define BIAS_HIGH               2400U
+#define SIGNAL_THRESHOLD        (AUDIO_FULL_SCALE / 32)  // -30 dBFS (64 counts on the 12-bit DAC)
+// Input mean further than this from 0 means the bias is wrong. On the on-chip
+// path that's 2048 +/- 341 counts (1.65 V +/- 0.27 V). The PCM1808 removes DC
+// itself, so on I2S it shouldn't trip.
+#define BIAS_TOLERANCE          (AUDIO_FULL_SCALE / 6)
 #define SAMPLES_PER_MILLISECOND (AUDIO_SAMPLE_RATE_HZ / 1000U)
 
 // Watch these in the debugger (Live Watch).
 volatile bringup_mode_t dbg_mode;
-volatile uint16_t dbg_in_mean;      // ~2048 when the input bias is healthy
-volatile uint16_t dbg_out_peak;
+volatile int32_t dbg_in_mean;       // ~0 when the input bias is healthy
+volatile uint32_t dbg_out_peak;
 
 static bringup_mode_t current_mode;
 static uint32_t boot_beep_ticks_left;       // status ticks until the boot beep ends; 0 = no beep
@@ -28,8 +30,8 @@ static uint32_t milliseconds_elapsed;
 static uint32_t status_ticks;               // counts 50 ms ticks; times the LED blinking
 static bool test_mode_button_was_down;
 static bool effect_button_was_down;
-static uint16_t input_mean;                 // latest meter readings
-static uint16_t output_peak;
+static int32_t input_mean;                  // latest meter readings
+static uint32_t output_peak;
 
 
 // printf goes to the debug UART: the C library sends all its output through _write().
@@ -87,7 +89,7 @@ static bool blink_is_on(uint32_t ticks_per_flip)
 
 static bool input_bias_is_out_of_range(void)
 {
-    return (input_mean < BIAS_LOW) || (input_mean > BIAS_HIGH);
+    return (input_mean < -BIAS_TOLERANCE) || (input_mean > BIAS_TOLERANCE);
 }
 
 
@@ -112,7 +114,8 @@ void start_boot_beep(void)
 
 // --- every 1 ms ---
 
-// Time is counted in audio samples, because the audio engine owns SysTick.
+// Time is counted in audio samples, so it follows the audio clock. With I2S a
+// "millisecond" is 46 samples = 0.98 ms, close enough for buttons and LEDs.
 // The subtraction is compared as a signed number so this keeps working when
 // the sample counter wraps around.
 void wait_for_next_millisecond(void)

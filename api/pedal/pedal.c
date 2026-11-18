@@ -7,7 +7,7 @@
 //   overdrive   drive     level
 //
 // boost_sample() and overdrive_sample() run inside the audio interrupt, once
-// per sample (96,000 times a second), so they must only do fast math: no
+// per sample (46,875 times a second with I2S), so they must only do fast math: no
 // printf, no powf, nothing that waits. Everything else runs from the main
 // loop. The two sides share only the effects' knob targets, and each target is
 // a single float, so the interrupt never sees a half-written value.
@@ -29,9 +29,9 @@ static const char *const effect_names[EFFECT_COUNT] = {
     [EFFECT_OVERDRIVE] = "overdrive",
 };
 
-// The audio engine's samples are 12-bit integers, -2048..2047. The effects
-// work in float, -1..1.
-#define SAMPLE_FULL_SCALE 2048.0f
+// The audio engine's samples are integers, -AUDIO_FULL_SCALE..AUDIO_FULL_SCALE-1
+// (16-bit with I2S, 12-bit on-chip). The effects work in float, -1..1.
+#define SAMPLE_FULL_SCALE ((float)AUDIO_FULL_SCALE)
 
 static fx_boost_t boost_state;
 static fx_overdrive_t overdrive_state;
@@ -59,7 +59,7 @@ static inline int32_t float_to_sample(float value)
 }
 
 // The engine hands over one sample at a time, so each effect processes a
-// block of one sample. The engine clips the result to 12 bits.
+// block of one sample. The engine clips the result.
 static int32_t boost_sample(int32_t sample)
 {
     float input = sample_to_float(sample);

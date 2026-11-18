@@ -38,7 +38,9 @@
 *****************************************************************************/
 
 // Guitar pedal firmware. The audio engine (api/audio) runs in an interrupt:
-// audio in (P14.0) -> effect -> audio out (P14.8). The loop below polls the
+// audio in -> effect -> audio out. AUDIO_USE_I2S in api/board.h picks the
+// converters: PCM1808 in / PCM5102 out over I2S (1), or the on-chip ADC on
+// P14.0 and DAC on P14.8 (0). The loop below polls the
 // encoders and buttons every 1 ms, and every 50 ms checks the on-board buttons
 // and updates the meters and LEDs. Each step is a function in main_helpers.c.
 //
@@ -54,12 +56,14 @@
 // effect is heard in passthrough mode and the encoders are its knobs.
 //
 // LED2 shows the signal:
-//   fast blink (10 Hz)   input bias is wrong: P14.0 averages far from 1.65 V
-//                        (check the 10k/10k divider and its 3.3 V wire)
+//   fast blink (10 Hz)   input bias is wrong: the input averages far from 0
+//                        (on-chip path: check P14.0's 10k/10k divider and
+//                        its 3.3 V wire)
 //   on                   signal present on the output
 //   off                  bias OK, silence
 //
-// Debugger (Live Watch): dbg_mode, dbg_in_mean (~2048), dbg_out_peak.
+// Debugger (Live Watch): dbg_mode, dbg_in_mean (~0), dbg_out_peak,
+// audio_in_last, audio_out_last.
 
 #include "api/board.h"
 #include "main_helpers.h"

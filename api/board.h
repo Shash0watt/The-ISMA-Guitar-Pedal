@@ -2,6 +2,7 @@
 #define BOARD_H
 
 #include "xmc_gpio.h"
+#include <stdbool.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -14,10 +15,24 @@ extern "C" {
 // means "XMC_GPIO_PORT0, 2"), so it can be passed straight to an XMC_GPIO
 // function or used to fill in a pin_t.
 
-// Audio. These two are fixed by the chip: P14.0 is the ADC input used
+// Which converters carry the audio:
+//   1  external PCM1808 ADC + PCM5102 DAC over I2S (pins below)
+//   0  the XMC's own ADC (P14.0) and DAC (P14.8)
+// Both circuits can stay wired; only the selected one runs.
+#define AUDIO_USE_I2S 1
+
+// On-chip audio. These two are fixed by the chip: P14.0 is the ADC input used
 // (group 0, channel 0) and P14.8 is the output of DAC0.
 #define AUDIO_INPUT_PIN         P14_0   // biased to 1.65 V
 #define AUDIO_OUTPUT_PIN        P14_8
+
+// I2S audio: USIC2 channel 1, all on port 3 (headers X1/X2). See api/i2s/i2s.c.
+// Clear of the encoders, buttons, LEDs, Ethernet, microSD and debug UART.
+#define I2S_MCLK_PIN            P3_4    // X1.1   12 MHz -> PCM1808 SCKI
+#define I2S_BCK_PIN             P3_13   // X2.1   3 MHz  -> both BCK
+#define I2S_LRCK_PIN            P3_0    // X1.14  46.875 kHz -> both LRCK
+#define I2S_DATA_IN_PIN         P3_12   // X2.2   <- PCM1808 DOUT
+#define I2S_DATA_OUT_PIN        P3_11   // X2.3   -> PCM5102 DIN
 
 // KY-040 encoders: CLK and DT are the two turn signals. Encoder and button
 // pins read low when active. Their pull-ups come from the board config
@@ -84,24 +99,35 @@ uint8_t button_is_pressed(int index);          // 1 while the button is held dow
 
 
 // === Audio engine (api/audio) ===
-// An interrupt at the sample rate: read ADC -> effect -> write DAC.
-// It owns SysTick at the highest priority (0); every other interrupt must use
-// a lower priority (a larger number) or the audio will glitch.
-
+// An interrupt at the sample rate: read input -> effect -> write output.
+// It runs at the highest priority (0); every other interrupt must use a lower
+// priority (a larger number) or the audio will glitch.
+//   I2S:     the I2S receive interrupt (USIC2_0_IRQn), once per frame.
+//            The converters' clocks set the rate. SysTick is free.
+//   on-chip: SysTick.
+//
+// Samples are signed and centered on 0, in the range
+// -AUDIO_FULL_SCALE .. AUDIO_FULL_SCALE - 1, on both paths.
+#if AUDIO_USE_I2S
+// 144 MHz / 3072: fixed by the I2S clock plan (exact 48 kHz isn't reachable).
+#define AUDIO_SAMPLE_RATE_HZ 46875U
+#define AUDIO_FULL_SCALE     32768   // 16-bit samples
+#else
 // 96 kHz keeps the DAC's stair-step artifacts far above what we can hear.
 // 48000U halves the processor load.
 #define AUDIO_SAMPLE_RATE_HZ 96000U
+#define AUDIO_FULL_SCALE     2048    // 12-bit samples
+#endif
 
-// An effect takes one sample and returns one sample, both centered on 0
-// (-2048..2047). It runs inside the audio interrupt, so it must be quick
-// (under ~1200 CPU cycles at 96 kHz) and never wait. The result is clipped
-// to 12 bits for you.
+// An effect takes one sample and returns one sample, both centered on 0. It
+// runs inside the audio interrupt, so it must be quick (under ~2500 CPU cycles
+// at 46.875 kHz, ~1200 at 96 kHz) and never wait. The result is clipped for you.
 typedef int32_t (*audio_effect_t)(int32_t sample);
 
 typedef enum {
-    AUDIO_TEST_NONE = 0,   // normal: ADC -> effect -> DAC
-    AUDIO_TEST_MIDSCALE,   // DAC holds mid-scale: silence
-    AUDIO_TEST_SINE_1K,    // DAC plays a 1 kHz sine
+    AUDIO_TEST_NONE = 0,   // normal: input -> effect -> output
+    AUDIO_TEST_MIDSCALE,   // output held at 0: silence
+    AUDIO_TEST_SINE_1K,    // output plays a 1 kHz sine
 } audio_test_mode_t;
 
 void init_audio(uint32_t sample_rate_hz);          // call once, after cybsp_init()
@@ -110,8 +136,8 @@ void audio_set_test_mode(audio_test_mode_t mode);
 uint32_t audio_sample_count(void);                 // samples since init (wraps around)
 
 // Meters. Reading one clears it, so each call covers the time since the last.
-uint16_t audio_out_peak(void);  // loudest output, 0..2048 counts from mid-scale
-uint16_t audio_in_mean(void);   // average input, 0..4095; ~2048 when the bias is right
+uint32_t audio_out_peak(void);  // loudest output, 0..AUDIO_FULL_SCALE
+int32_t audio_in_mean(void);    // average input; ~0 when the input bias is right
 
 
 // === Pedal (api/pedal) ===
@@ -121,6 +147,16 @@ uint16_t audio_in_mean(void);   // average input, 0..4095; ~2048 when the bias i
 void init_pedal(void);         // call once, after init_audio()
 void poll_pedal(void);         // call every 1 ms: sends knob changes to the effect
 void pedal_next_effect(void);  // bypass -> boost -> overdrive -> bypass ...
+
+
+// === I2S (api/i2s) ===
+// Used by the audio engine when AUDIO_USE_I2S is 1. Mono for now: the engine
+// averages left and right in, and writes the same sample to both out.
+
+void init_i2s(void);            // starts the clocks and the receive interrupt
+// True when it has read a whole frame (left + right) from the receive FIFO.
+bool i2s_read_frame(int16_t *left, int16_t *right);
+void i2s_write_frame(int16_t left, int16_t right);
 
 
 // === ADC (api/adc) ===
